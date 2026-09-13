@@ -1,7 +1,9 @@
 # Mem0 Paper Reimplementation
 
-This project is intended to reproduce and productize the architecture described in
-*Mem0: Building Production-Ready AI Agents with Scalable Long-Term Memory*.
+This project is intended to reproduce and productize the text-memory architecture
+described in *Mem0: Building Production-Ready AI Agents with Scalable Long-Term
+Memory*. Mem0g graph memory is deferred until the text-memory implementation and
+LOCOMO evaluation are stable.
 
 - [Product requirements document](docs/PRD.md)
 - [Implementation architecture](docs/ARCHITECTURE.md)

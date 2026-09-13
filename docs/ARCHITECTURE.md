@@ -1,4 +1,4 @@
-# Mem0 Implementation Architecture
+# Mem0 Text-Memory Implementation Architecture
 
 ## 1. Purpose and authority
 
@@ -22,27 +22,25 @@ architecture drift.
 
 | Field | Value |
 |---|---|
-| Status | Target architecture; implementation not started |
-| Version | 1.0 |
-| Date | 2026-07-31 |
+| Status | Target text-memory architecture; implementation not started |
+| Version | 1.1 |
+| Date | 2026-09-13 |
 | Product requirements | [`docs/PRD.md`](PRD.md) |
 | Research source | [`mem0paper.pdf`](../mem0paper.pdf) |
-| Editable visual | [Mem0 System Architecture in FigJam](https://www.figma.com/board/npXadicYwJDf7Mrh8C8uln) |
 
 ## 2. Architectural goals
 
 The architecture must:
 
-- reproduce the April 2025 Mem0 and Mem0g algorithms without depending on the
+- reproduce the April 2025 Mem0 text-memory algorithm without depending on the
   upstream `mem0ai` implementation;
 - keep research behavior reproducible while allowing production hardening;
 - make tenant and subject isolation impossible to bypass accidentally;
 - preserve source evidence, timestamps, versions, and mutation history;
 - keep online retrieval latency independent of total conversation length;
-- make LLM providers, embedding providers, vector indexing, and graph memory
-  replaceable behind stable interfaces;
+- make LLM providers, embedding providers, and vector indexing replaceable
+  behind stable interfaces;
 - support idempotent replay of long-running ingestion operations;
-- allow text memory to ship before graph memory;
 - provide evaluation, token, latency, and cost measurements as first-class
   outputs.
 
@@ -60,14 +58,12 @@ These rules apply across all modules:
 6. LLMs propose facts and operations; deterministic code enforces permissions,
    identifiers, state transitions, and transaction boundaries.
 7. Active search never returns deleted, superseded, expired, or invalid facts.
-8. Text memory is authoritative for the Mem0 pipeline. The graph is an
-   asynchronously maintained projection used by Mem0g.
-9. Graph failure must not roll back a successfully committed text memory.
-10. Prompt, model, embedding, schema, and threshold versions are recorded with
+8. Text memory is the sole memory representation in the active architecture.
+9. Prompt, model, embedding, schema, and threshold versions are recorded with
     every generated artifact.
-11. Research and production profiles share domain code but use separate,
+10. Research and production profiles share domain code but use separate,
     explicit configuration.
-12. Raw conversation content and secret values are not written to ordinary
+11. Raw conversation content and secret values are not written to ordinary
     logs, metrics, or traces.
 
 ## 4. System context
@@ -90,7 +86,6 @@ flowchart LR
     end
     subgraph datastore ["Memory Stores"]
         postgres["PostgreSQL and pgvector"]
-        neo4j["Neo4j Knowledge Graph"]
     end
     subgraph external ["External Platforms"]
         modelProviders["LLM and Embedding Providers"]
@@ -109,9 +104,7 @@ flowchart LR
     apiService -->|"Searches"| retrievalService
     retrievalService -->|"Builds Evidence"| answerService
     workerService -->|"Writes Memories"| postgres
-    workerService -->|"Projects Graph"| neo4j
     retrievalService -->|"Searches Vectors"| postgres
-    retrievalService -->|"Traverses Graph"| neo4j
     workerService -.->|"Extracts and Resolves"| modelProviders
     retrievalService -.->|"Embeds Query"| modelProviders
     answerService -.->|"Generates Answer"| modelProviders
@@ -139,10 +132,9 @@ measured load requires it.
 | Unit | Responsibility | Scaling signal | Must not do |
 |---|---|---|---|
 | API process | Authentication context, request validation, idempotency lookup, synchronous search, job/status APIs | HTTP concurrency and latency | Run long LLM ingestion workflows in-process |
-| Worker process | Ingestion, extraction, resolution, summaries, graph projection, re-embedding, erasure | Temporal queue depth and activity latency | Expose public HTTP endpoints |
+| Worker process | Ingestion, extraction, resolution, summaries, re-embedding, erasure | Temporal queue depth and activity latency | Expose public HTTP endpoints |
 | Evaluation runner | Dataset import, baseline runs, metrics, benchmark reports | Explicit batch jobs | Mutate production tenant data |
-| PostgreSQL | Transactional source of truth for conversations, text memories, vectors, events, workflow metadata, and outbox | Query latency, storage, index recall | Store graph traversal structure |
-| Neo4j | Optional Mem0g entity and relationship projection | Graph query latency and graph size | Become the source of truth for raw messages or text memory |
+| PostgreSQL | Transactional source of truth for conversations, text memories, vectors, events, workflow metadata, and outbox | Query latency, storage, index recall | Act as the workflow engine |
 | Temporal | Durable workflow history, retries, schedules, and task queues | Queue age and workflow backlog | Store product-domain records |
 | OTLP collector | Receive traces and metrics and export them to monitoring backends | Export failures and queue size | Receive raw memory text |
 
@@ -156,11 +148,10 @@ src/memory_service/
 |-- application/         # Use cases and transaction orchestration
 |-- domain/              # Entities, value objects, policies, repository ports
 |-- ingestion/           # Context assembly, extraction, reconciliation
-|-- retrieval/           # Text search, graph search, fusion, token budgeting
-|-- graph/               # Entity linking, relationships, conflict projection
+|-- retrieval/           # Text search, ranking, deduplication, token budgeting
 |-- prompts/             # Versioned prompt manifests and output schemas
 |-- providers/           # LLM, embedding, tokenization adapters
-|-- repositories/        # PostgreSQL, pgvector, and Neo4j implementations
+|-- repositories/        # PostgreSQL and pgvector implementations
 |-- workflows/           # Temporal workflows and replay-safe activities
 |-- telemetry/           # Tracing, metrics, redaction, cost accounting
 `-- config/              # Validated research and production configuration
@@ -182,10 +173,8 @@ flowchart LR
     application --> domain["Domain"]
     application --> ingestion["Ingestion"]
     application --> retrieval["Retrieval"]
-    application --> graphMemory["Graph"]
     ingestion --> domain
     retrieval --> domain
-    graphMemory --> domain
     repositories["Repository Adapters"] --> domain
     providers["Provider Adapters"] --> domain
 ```
@@ -260,46 +249,7 @@ Summary refresh is a separate workflow:
 6. Failed refreshes keep the previous successful summary active and retry
    independently of ingestion.
 
-### 7.3 Graph projection
-
-```mermaid
-sequenceDiagram
-    participant Outbox
-    participant Temporal
-    participant GraphWorker
-    participant Model
-    participant Postgres
-    participant Neo4j
-
-    Outbox->>Temporal: Start graph projection
-    Temporal->>GraphWorker: Process committed memory event
-    GraphWorker->>Postgres: Load source evidence
-    GraphWorker->>Model: Extract typed entities
-    Model-->>GraphWorker: Return entity schema
-    GraphWorker->>Model: Generate relationship triplets
-    Model-->>GraphWorker: Return triplet schema
-    GraphWorker->>Neo4j: Match or create entity nodes
-    GraphWorker->>Neo4j: Find conflicting relationships
-    GraphWorker->>Model: Resolve graph conflicts
-    Model-->>GraphWorker: Return invalidations
-    GraphWorker->>Neo4j: Apply edges and validity changes
-    GraphWorker-->>Temporal: Record projection checkpoint
-```
-
-Projection rules:
-
-- the outbox event ID is the graph-projection idempotency key;
-- entity identity uses exact canonical/alias matching followed by embedding
-  similarity;
-- the initial entity similarity candidate threshold is `0.78`, configurable by
-  entity type;
-- old conflicting edges are marked invalid with validity metadata, not
-  physically deleted;
-- Neo4j stores source memory/message IDs for every node and relationship;
-- projection checkpoints allow the graph to be rebuilt from PostgreSQL events;
-- text memory remains available if graph projection is delayed or unavailable.
-
-### 7.4 Search and answer-context assembly
+### 7.3 Search and answer-context assembly
 
 ```mermaid
 sequenceDiagram
@@ -308,16 +258,11 @@ sequenceDiagram
     participant Retrieval
     participant Model
     participant Postgres
-    participant Neo4j
 
     Client->>API: Search with tenant and subject scope
     API->>Retrieval: Validate filters and token budget
     Retrieval->>Model: Embed query
     Retrieval->>Postgres: Search active text memories
-    Retrieval->>Model: Extract query entities when graph is enabled
-    Retrieval->>Neo4j: Traverse matching entity neighborhood
-    Retrieval->>Neo4j: Search semantic triplets
-    Retrieval->>Retrieval: Normalize and fuse ranked results
     Retrieval->>Retrieval: Deduplicate and enforce token budget
     Retrieval-->>API: Return timestamped evidence bundle
     API-->>Client: Return evidence or generated answer
@@ -325,18 +270,12 @@ sequenceDiagram
 
 Retrieval rules:
 
-- text-only Mem0 uses dense similarity over active memories;
-- Mem0g adds entity-centric traversal and semantic triplet search;
-- online graph traversal defaults to one hop and is capped at two;
-- text, entity, and triplet rankings use reciprocal-rank fusion in the initial
-  implementation;
-- graph and triplet thresholds are configuration values and are recorded in
-  evaluation output;
+- Mem0 uses dense similarity over active text memories;
 - results are ordered and trimmed only after tenant/subject filtering;
 - production responses include memory IDs and evidence metadata;
 - benchmark answer generation is limited to six words.
 
-### 7.5 Manual correction and erasure
+### 7.4 Manual correction and erasure
 
 Manual correction creates the same version and audit events as an automated
 update. It never edits memory text in place.
@@ -344,8 +283,8 @@ update. It never edits memory text in place.
 Erasure is a durable workflow that:
 
 1. prevents new writes for the target subject;
-2. identifies raw messages, summaries, text memories, embeddings, graph
-   entities/relationships, caches, and queued artifacts;
+2. identifies raw messages, summaries, text memories, embeddings, caches, and
+   queued artifacts;
 3. removes or cryptographically renders inaccessible each artifact;
 4. records redacted completion evidence;
 5. verifies that ordinary search returns no subject data;
@@ -379,27 +318,6 @@ stateDiagram-v2
 ```
 
 Only `Active` memories are eligible for ordinary retrieval.
-
-### 8.2 Neo4j projection
-
-Entity nodes contain:
-
-- tenant and subject scope;
-- canonical name and aliases;
-- entity type;
-- embedding and embedding version;
-- source memory/message IDs;
-- creation time and status.
-
-Relationship edges contain:
-
-- canonical relation label and textual triplet encoding;
-- embedding and embedding version;
-- confidence and source IDs;
-- event time, `valid_from`, and `valid_to`;
-- active/invalid status and invalidation provenance.
-
-Neo4j data is rebuildable. PostgreSQL memory and event records are not.
 
 ## 9. Public interfaces
 
@@ -450,7 +368,6 @@ Tokenizer
 `-- trim(items, token_budget, encoding)
 
 TextMemoryRepository
-GraphMemoryRepository
 ConversationRepository
 SummaryRepository
 WorkflowRepository
@@ -482,10 +399,6 @@ providers only through configuration and a passing regression evaluation.
 | Recent message window `m` | `10` |
 | Similar memory count `s` | `10` |
 | Text retrieval | Dense semantic similarity |
-| Entity candidate threshold | Initial `0.78`, calibrated on development data |
-| Triplet threshold | Initial `0.70`, calibrated on development data |
-| Graph traversal | One hop, maximum two |
-| Ranking fusion | Reciprocal-rank fusion |
 | Judge runs | `10` per method |
 
 Research configuration is immutable within a benchmark run and is saved with
@@ -497,7 +410,6 @@ Production configuration may add:
 
 - provider failover;
 - per-tenant quotas and retention;
-- graph-memory enablement;
 - cost ceilings;
 - index tuning;
 - rate limits;
@@ -525,16 +437,7 @@ Filtered approximate-nearest-neighbor recall must be measured. If an ANN query
 returns too few scoped results, retrieval retries with a larger search window
 or exact search.
 
-### 12.2 Neo4j
-
-Neo4j owns graph traversal and relationship-vector queries. It does not accept a
-write without tenant/subject scope and source evidence.
-
-The Python driver is isolated in the graph repository adapter. Cypher queries
-are parameterized and covered by integration tests. Graph schema and vector
-index creation are migration-controlled.
-
-### 12.3 Transactional outbox
+### 12.2 Transactional outbox
 
 The outbox bridges PostgreSQL commits to asynchronous workflows:
 
@@ -564,7 +467,6 @@ Workflow names are stable public operational contracts:
 
 - `ingest-conversation-pair`;
 - `refresh-conversation-summary`;
-- `project-graph-memory`;
 - `reembed-memory-scope`;
 - `erase-memory-subject`;
 - `run-locomo-evaluation`.
@@ -591,7 +493,6 @@ Required metrics:
 - `ADD`, `UPDATE`, `DELETE`, and `NOOP` counts;
 - schema-validation and provider retry rates;
 - vector empty-result and exact-fallback rates;
-- graph entities/edges created, reused, and invalidated;
 - queue depth and oldest task age;
 - model tokens and estimated cost;
 - benchmark scores by category and commit.
@@ -620,7 +521,6 @@ Telemetry processors redact message and memory content before export.
 Docker Compose provides:
 
 - PostgreSQL with pgvector;
-- Neo4j;
 - Temporal server and UI;
 - OTLP collector;
 - Prometheus and Grafana.
@@ -635,18 +535,16 @@ flowchart LR
     traffic["Client Traffic"] --> ingress["Managed Ingress"]
     ingress --> apiPods["API Replicas"]
     apiPods --> postgres["Managed PostgreSQL"]
-    apiPods --> neo4j["Managed Neo4j"]
     apiPods --> temporal["Temporal Cloud or Cluster"]
     temporal --> workerPods["Worker Replicas"]
     workerPods --> postgres
-    workerPods --> neo4j
     apiPods --> otel["OTLP Collector"]
     workerPods --> otel
 ```
 
 API and workers scale independently. Databases use managed backups and
 point-in-time recovery where available. Production readiness requires tested
-restore, erasure, and graph-rebuild procedures.
+restore and erasure procedures.
 
 ## 17. Testing boundaries
 
@@ -654,10 +552,10 @@ restore, erasure, and graph-rebuild procedures.
 |---|---|
 | Domain unit tests | Memory state transitions, scope rules, temporal logic, token budgeting |
 | Prompt contract tests | Structured schemas, extraction policy, conflict cases, injection resistance |
-| Repository integration tests | PostgreSQL transactions, pgvector filtering/recall, Neo4j validity behavior |
+| Repository integration tests | PostgreSQL transactions and pgvector filtering/recall |
 | Workflow tests | Retries, replay safety, idempotency, dead-letter behavior |
 | API contract tests | Authentication context, request/response schemas, stable errors |
-| End-to-end tests | Ingest, retrieve, update, graph projection, correction, export, erasure |
+| End-to-end tests | Ingest, retrieve, update, correction, export, erasure |
 | Evaluation tests | LOCOMO import, baselines, metrics, variance, latency, and token reporting |
 
 No provider, prompt, threshold, index, or ranking change can merge without
@@ -674,13 +572,8 @@ Build in this dependency order:
 5. embedding search and four-way memory resolution;
 6. synchronous search and evidence-bundle APIs;
 7. Temporal workflows, outbox dispatch, retries, and summary refresh;
-8. Neo4j graph projection and conflict invalidation;
-9. entity/triplet retrieval and rank fusion;
-10. administrative correction, export, and erasure;
-11. observability, load tests, failure tests, and production runbooks.
-
-Do not begin graph-memory implementation before text-memory evaluation and
-versioning behavior are stable.
+8. administrative correction, export, and erasure;
+9. observability, load tests, failure tests, and production runbooks.
 
 ## 19. Architecture decisions
 
@@ -690,13 +583,12 @@ These decisions are locked for the initial implementation:
 |---|---|---|
 | AD-001 | Modular monolith with API, worker, and evaluation entrypoints | Preserves boundaries without premature distributed complexity |
 | AD-002 | PostgreSQL plus pgvector is the text-memory source of truth | Transactions, provenance, filters, and vectors stay consistent |
-| AD-003 | Neo4j is an optional rebuildable graph projection | Matches the paper and isolates graph complexity |
-| AD-004 | Temporal coordinates durable background work | LLM calls and cross-store projection require replay-safe retries |
+| AD-003 | Mem0g and its graph datastore are deferred outside the active architecture | Concentrates implementation and evaluation on mastering paper-faithful Mem0 text memory first; see [ADR-0001](adr/0001-defer-mem0g.md) |
+| AD-004 | Temporal coordinates durable background work | LLM calls and long-running maintenance require replay-safe retries |
 | AD-005 | Provider SDKs remain behind domain ports | Research pinning and production replacement remain possible |
 | AD-006 | Memory records are immutable versions with soft invalidation | Auditability and temporal reasoning require history |
-| AD-007 | Graph updates are eventually consistent with text memory | Graph outages must not block core memory ingestion |
-| AD-008 | No LangChain or LangGraph in the core pipeline | The state machine is explicit and small |
-| AD-009 | Research behavior is a permanent configuration profile | Later enhancements must not erase reproducibility |
+| AD-007 | No agent orchestration framework in the core pipeline | The state machine is explicit and small |
+| AD-008 | Research behavior is a permanent configuration profile | Later enhancements must not erase reproducibility |
 
 Any change to these decisions requires an ADR and updates to this file before
 implementation.
@@ -724,12 +616,13 @@ Every architecture update should include:
 
 The following are intentionally outside the initial architecture:
 
+- Mem0g graph memory, including Neo4j, entity/relation extraction, conflict
+  invalidation, and graph retrieval;
 - the upstream April 2026 ADD-only extraction algorithm;
-- BM25/entity multi-signal retrieval;
+- BM25 and other multi-signal retrieval;
 - multimodal and procedural memory;
 - per-tenant physical database isolation;
 - a public web dashboard;
-- automatic graph ontology learning;
 - foundation-model fine-tuning.
 
 These may be added only after the paper-faithful baseline passes evaluation and

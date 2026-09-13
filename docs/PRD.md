@@ -1,4 +1,4 @@
-# Product Requirements Document: Mem0 Paper Reimplementation
+# Product Requirements Document: Mem0 Text-Memory Reimplementation
 
 ## 1. Document control
 
@@ -6,8 +6,8 @@
 |---|---|
 | Product | Mem0-compatible long-term memory service |
 | Document status | Draft for implementation |
-| Version | 1.0 |
-| Date | 2026-07-30 |
+| Version | 1.1 |
+| Date | 2026-09-13 |
 | Primary source | [Local paper](../mem0paper.pdf) |
 | Canonical paper version | [arXiv:2504.19413v1](https://arxiv.org/abs/2504.19413) |
 | Intended audience | Product, ML, backend, platform, security, and QA engineers |
@@ -20,18 +20,14 @@ strength. Paper page references refer to the page number printed in the PDF.
 The product is a multi-tenant long-term memory service for conversational AI
 agents. It will incrementally convert new user/assistant exchanges into concise
 memories, reconcile those memories against prior knowledge, retrieve only
-question-relevant information, and optionally maintain a temporal knowledge
-graph.
+question-relevant information, and preserve timestamps and provenance for
+temporal reasoning.
 
-The implementation has two modes:
-
-1. **Mem0 text memory**, the first production milestone. It uses conversation
-   summaries and recent turns to extract salient facts, then chooses one of
-   `ADD`, `UPDATE`, `DELETE`, or `NOOP` after comparing each fact with similar
-   stored memories.
-2. **Mem0g graph memory**, an extension that represents entities as nodes and
-   relationships as directed, labeled edges. It augments text retrieval with
-   entity-centric subgraph traversal and semantic triplet search.
+The active implementation scope is **Mem0 text memory**. It uses conversation
+summaries and recent turns to extract salient facts, then chooses one of `ADD`,
+`UPDATE`, `DELETE`, or `NOOP` after comparing each fact with similar stored
+memories. Mem0g is deferred and is not part of the current requirements,
+architecture, dependencies, delivery plan, or acceptance criteria.
 
 The service must expose stable APIs for ingestion, memory search, answer
 context assembly, administration, and erasure. It must also ship with a
@@ -45,9 +41,12 @@ be measured before release.
 The April 2025 paper is the behavioral specification for this project:
 
 - Mem0 extraction and four-way update flow: pages 3-5 and Appendix B.
-- Mem0g entity, relation, conflict, and retrieval flow: pages 5-6.
 - LOCOMO evaluation and baselines: pages 6-14.
 - Answer-generation and judge prompt requirements: Appendix A.
+
+The current scope reproduces only the paper's Mem0 text-memory architecture.
+The Mem0g sections of the paper remain a future reference and require a new
+architecture decision before implementation.
 
 The current [upstream Mem0 repository](https://github.com/mem0ai/mem0) announced
 a materially different algorithm in April 2026: ADD-only extraction,
@@ -94,7 +93,7 @@ the number of relevant memories, rather than total conversation length.
 - Keep stored knowledge coherent when new messages augment or contradict prior
   information.
 - Return relevant, timestamped memories with source provenance.
-- Support temporal and relational reasoning without sending full history to the
+- Support temporal and multi-fact reasoning without sending full history to the
   answer model.
 - Make memory behavior inspectable, testable, reversible, and safe for
   multi-tenant production use.
@@ -112,6 +111,8 @@ the number of relevant memories, rather than total conversation length.
 - Exact numerical equality with the paper on different hardware or unpinned
   model versions.
 - The upstream April 2026 ADD-only algorithm.
+- Mem0g graph memory, graph databases, entity linking, and relationship-triplet
+  retrieval.
 
 ## 6. Users and principal use cases
 
@@ -130,8 +131,7 @@ Primary use cases:
 2. A question depends on facts spread across multiple sessions.
 3. A question requires resolving a relative time expression against the
    original message timestamp.
-4. A relational question requires following connections among people, places,
-   events, and dates.
+4. A question requires combining several retrieved text memories.
 5. A user requests deletion or correction of stored memory.
 
 ## 7. Product principles
@@ -174,7 +174,6 @@ flowchart LR
     L --> O
     M --> O
     N --> O
-    O --> P["Optional graph update"]
     B --> Q["Asynchronous summary refresh"]
 ```
 
@@ -184,12 +183,7 @@ flowchart LR
 flowchart LR
     A["Question and tenant/subject scope"] --> B["Query embedding"]
     B --> C["Text-memory vector search"]
-    A --> D["Optional query entity extraction"]
-    D --> E["Entity matching and subgraph traversal"]
-    B --> F["Semantic triplet search"]
     C --> G["Rank, deduplicate, enforce token budget"]
-    E --> G
-    F --> G
     G --> H["Timestamped evidence bundle"]
     H --> I["Answer model or caller's agent"]
 ```
@@ -201,7 +195,6 @@ flowchart LR
 - Summary worker
 - LLM and embedding provider adapters
 - Text memory repository and vector index
-- Optional graph memory repository
 - Retrieval/ranking service
 - Evaluation runner
 - Audit, metrics, and tracing pipeline
@@ -226,16 +219,7 @@ flowchart LR
 - Text-memory retrieval and evidence-bundle generation.
 - Search, inspect, update, delete, and erase APIs.
 
-### Phase 2 - Mem0g
-
-- Typed entity extraction.
-- Directed labeled relationship generation.
-- Entity deduplication through embedding similarity.
-- Relationship conflict detection and invalidation.
-- Entity-centric traversal and semantic triplet retrieval.
-- Fusion of text and graph evidence.
-
-### Phase 3 - Production hardening
+### Phase 2 - Production hardening
 
 - Durable workflows and replay-safe activities.
 - Rate limiting, quotas, encryption, retention, and audit export.
@@ -257,7 +241,7 @@ be UUIDv7 or another time-sortable, collision-resistant identifier.
 
 **FR-ID-004** Ingestion MUST accept an idempotency key. Replaying the same
 tenant/key/payload MUST return the original result without duplicate messages,
-memories, graph elements, or billable LLM calls.
+memories, or billable LLM calls.
 
 ### 10.2 Conversation ingestion
 
@@ -400,10 +384,10 @@ event/validity time, creation time, source message IDs, and version state.
 **FR-RET-004** The retrieval service MUST deduplicate equivalent memories and
 enforce a configurable context token budget before returning evidence.
 
-**FR-RET-005** Deleted, superseded, expired, or invalid graph facts MUST not be
-returned unless an authorized audit query explicitly requests historical data.
+**FR-RET-005** Deleted, superseded, or expired memories MUST not be returned
+unless an authorized audit query explicitly requests historical data.
 
-**FR-RET-006** Hybrid keyword/entity ranking is a post-MVP experiment and MUST
+**FR-RET-006** Hybrid keyword ranking is a post-MVP experiment and MUST
 be feature-flagged so paper-faithful evaluation remains available.
 
 ### 10.8 Answer-context assembly
@@ -427,65 +411,14 @@ evaluation.
 **FR-ANS-005** If evidence is insufficient, production mode MUST return an
 explicit `insufficient_evidence` state rather than invent an answer.
 
-### 10.9 Graph memory (Mem0g)
-
-**FR-GR-001** Graph memory MUST be optional per tenant and enabled independently
-from text memory.
-
-**FR-GR-002** The entity extractor MUST return normalized entity name, type,
-source spans/messages, aliases, embedding, and creation timestamp. Initial
-types include Person, Location, Organization, Event, Date/Time, Object,
-Preference, Activity, and Concept.
-
-**FR-GR-003** The relationship generator MUST return directed triplets
-`(source_entity, relation, destination_entity)` with source evidence,
-event/validity time, confidence, and normalized relation label.
-
-**FR-GR-004** For each endpoint of a new triplet, the system MUST use embedding
-similarity and exact/alias keys to locate an existing node. It may create zero,
-one, or two new nodes before adding the edge.
-
-**FR-GR-005** The paper leaves entity threshold `t` unspecified. The initial
-candidate default is cosine similarity `0.78`; it MUST be calibrated on a
-held-out set and configurable by entity type.
-
-**FR-GR-006** A conflict detector MUST identify existing relationships that may
-be contradicted by the new triplet. An LLM resolver decides whether an old
-relationship becomes invalid.
-
-**FR-GR-007** Contradicted graph edges MUST be invalidated, not physically
-removed, preserving `valid_from`, `valid_to`, `invalidated_by`, and provenance
-for temporal reasoning.
-
-**FR-GR-008** Entity-centric retrieval MUST:
-
-1. extract query entities;
-2. map them to graph nodes;
-3. traverse bounded incoming and outgoing relationships;
-4. return a relevance-ranked subgraph.
-
-**FR-GR-009** Semantic triplet retrieval MUST embed the complete query, compare
-it with textual encodings of graph triplets, apply a configurable relevance
-threshold, and return results in decreasing similarity order.
-
-**FR-GR-010** Text, entity-centric, and triplet results MUST be normalized and
-fused. Reciprocal-rank fusion is the initial deterministic default because the
-paper does not specify a fusion formula. Weights MUST be configuration, not
-prompt constants.
-
-**FR-GR-011** Graph traversal depth MUST default to one hop and be capped at two
-hops for online requests unless explicitly authorized. Token and node/edge
-budgets must be enforced.
-
-### 10.10 Administration and privacy
+### 10.9 Administration and privacy
 
 **FR-ADM-001** Authorized clients MUST be able to inspect, correct, invalidate,
 export, and erase memories.
 
 **FR-ADM-002** Erasure MUST remove or cryptographically render inaccessible raw
-messages, summaries, text memories, embeddings, graph entities/edges, caches,
-and queued artifacts for the requested subject, subject to documented legal
-retention rules.
+messages, summaries, text memories, embeddings, caches, and queued artifacts
+for the requested subject, subject to documented legal retention rules.
 
 **FR-ADM-003** Every mutation MUST produce an immutable audit event containing
 actor, scope, operation, target, timestamp, and request ID, without logging
@@ -510,7 +443,7 @@ or memory. Expired records are excluded from retrieval and later purged.
 | `memory_embeddings` | memory ID, provider/model/dimensions, vector, created time |
 | `memory_events` | candidate, operation, target/result IDs, rationale, model/prompt versions, request/job ID, token/latency data |
 | `workflows` | ID, type, idempotency key, status, attempts, timestamps, error class |
-| `outbox_events` | transactionally committed events for graph and summary workers |
+| `outbox_events` | transactionally committed events for summary and maintenance workers |
 | `audit_events` | actor, scope, action, target, request ID, timestamp, redacted metadata |
 
 Required indexes:
@@ -521,28 +454,6 @@ Required indexes:
 - unique active-version constraint per memory lineage;
 - source message and workflow lookup indexes.
 
-### 11.2 Graph store
-
-Node properties:
-
-- `entity_id`, `tenant_id`, subject scope;
-- canonical name, aliases, entity type;
-- embedding and embedding version;
-- source message IDs;
-- created time and status.
-
-Relationship properties:
-
-- canonical relation label and textual triplet encoding;
-- embedding and embedding version;
-- confidence and source message IDs;
-- event time, `valid_from`, `valid_to`;
-- status, invalidation reason, and invalidating relationship ID;
-- created and updated time.
-
-Tenant and subject fields MUST be present on both nodes and relationships even
-if the application also uses database-per-tenant isolation.
-
 ## 12. API requirements
 
 All endpoints are versioned under `/v1`, authenticated, tenant-scoped, and use
@@ -552,7 +463,7 @@ JSON. Long-running writes return `202 Accepted` with a job resource.
 |---|---|
 | `POST /v1/conversations/{id}/messages:ingest` | Store a message pair and run extraction/reconciliation |
 | `GET /v1/jobs/{job_id}` | Inspect workflow status and memory operations |
-| `POST /v1/memories:search` | Retrieve scoped text and optional graph memories |
+| `POST /v1/memories:search` | Retrieve scoped text memories |
 | `POST /v1/memory-context` | Build a token-budgeted evidence bundle |
 | `POST /v1/answers` | Optional retrieval plus answer generation |
 | `GET /v1/memories/{memory_id}` | Inspect active memory and provenance |
@@ -583,10 +494,7 @@ Example ingestion body:
       "content": "I will keep that in mind.",
       "event_time": "2026-07-30T10:00:02Z"
     }
-  ],
-  "features": {
-    "graph_memory": true
-  }
+  ]
 }
 ```
 
@@ -609,19 +517,18 @@ Example resolver output contract:
 
 | Concern | Recommendation | Reason |
 |---|---|---|
-| Language | Python 3.12+ | Strong LLM, evaluation, data, and graph ecosystem; matches the research workload. |
+| Language | Python 3.12+ | Strong LLM, evaluation, and data ecosystem; matches the research workload. |
 | API | [FastAPI](https://fastapi.tiangolo.com/tutorial/bigger-applications/) | Async APIs, dependency-based security, OpenAPI generation, and clean modular routers. |
 | Schema validation | [Pydantic](https://docs.pydantic.dev/latest/concepts/models/) | Strict validation for LLM structured outputs and public contracts. |
 | ORM/migrations | [SQLAlchemy 2 async](https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html) + Alembic | Provider-independent relational access and controlled migrations. |
 | Text/vector storage | PostgreSQL + [pgvector](https://github.com/pgvector/pgvector) | Transactional metadata and vector search in one system; HNSW and exact-search options. |
-| Graph storage | [Neo4j](https://neo4j.com/docs/cypher-manual/current/indexes/semantic-indexes/vector-indexes/) with Python driver 6.x | The database used by the paper; supports graph traversal and vector indexes. |
 | Durable workflows | [Temporal Python SDK](https://docs.temporal.io/develop/python) | Durable retries and replayable multi-step LLM/database workflows. |
 | LLM integration | Thin provider adapter; OpenAI Responses API in the reproduction profile | Avoid framework lock-in while supporting strict structured outputs/function calls. |
 | Embeddings | Provider adapter; `text-embedding-3-small` in research profile | Matches the paper and can later be replaced through a versioned shadow index. |
 | Telemetry | [OpenTelemetry Python](https://opentelemetry.io/docs/languages/python/) + OTLP collector | Vendor-neutral traces and metrics for every pipeline stage. |
 | Metrics/dashboard | Prometheus + Grafana | Latency histograms, rates, queue depth, token and error dashboards. |
 | Packaging | `uv` + `pyproject.toml` | Reproducible and fast dependency management. |
-| Local environment | Docker Compose | Repeatable PostgreSQL, Neo4j, Temporal, and telemetry stack. |
+| Local environment | Docker Compose | Repeatable PostgreSQL, Temporal, and telemetry stack. |
 | Deployment | Kubernetes or managed container platform | Separate API and workers, autoscaling, secrets, disruption control. |
 | Testing | pytest, pytest-asyncio, Hypothesis, Testcontainers | Unit, concurrency, property, and real-database integration tests. |
 
@@ -632,28 +539,24 @@ Example resolver output contract:
   events need transactions. pgvector supports exact search plus HNSW/IVFFlat.
   Tenant and subject B-tree indexes must accompany vector indexes; filtered ANN
   recall must be measured.
-- Neo4j remains separate because graph traversal is a core Mem0g requirement.
-  Current Neo4j documentation supports vector indexes on nodes and
-  relationships. Vector dimensions and cosine similarity should be explicitly
-  configured.
 - OpenAI is a reproduction adapter, not a domain dependency. Interfaces for
   chat completion, structured output, embeddings, token accounting, and model
   metadata must allow other providers or local models.
 - Model snapshots must be pinned for benchmark runs. OpenAI's API documentation
   notes that behavior can change between snapshots even within a model family.
-- Temporal is recommended for production ingestion, graph construction,
-  summary refresh, re-embedding, and erasure. A lightweight local worker may be
+- Temporal is recommended for production ingestion, summary refresh,
+  re-embedding, and erasure. A lightweight local worker may be
   used during the first prototype, but FastAPI process-local background tasks
   are not sufficient for production durability.
-- LangChain or LangGraph is not required for the core pipeline. The state
-  machine is small and should remain explicit. An agent framework may consume
-  the memory APIs at the integration boundary.
+- An agent orchestration framework is not required for the core pipeline. The
+  state machine is small and should remain explicit. An agent framework may
+  consume the memory APIs at the integration boundary.
 
 ### 13.3 Research-profile model settings
 
 To reproduce the paper as closely as current services allow:
 
-- extraction/update/entity/relation model: pinned `gpt-4o-mini` snapshot;
+- extraction/update model: pinned `gpt-4o-mini` snapshot;
 - embeddings: `text-embedding-3-small`;
 - temperature: `0`;
 - recent-message window `m`: `10`;
@@ -681,12 +584,8 @@ Required prompt families:
 1. conversation summarization;
 2. candidate fact extraction;
 3. four-way operation resolution;
-4. entity extraction;
-5. relationship generation;
-6. graph conflict resolution;
-7. query entity extraction;
-8. answer generation;
-9. LLM-as-a-Judge evaluation.
+4. answer generation;
+5. LLM-as-a-Judge evaluation.
 
 User/assistant conversation content MUST be delimited and treated as untrusted
 data. Instructions found inside messages must not override extraction policy or
@@ -701,12 +600,8 @@ Under the agreed benchmark hardware and provider configuration:
 - Mem0 text search target: p50 <= 200 ms and p95 <= 300 ms.
 - Mem0 total answer target: p50 <= 1.0 s and p95 <= 2.0 s, excluding
   provider-wide incidents.
-- Mem0g search target: p50 <= 600 ms and p95 <= 900 ms.
-- Mem0g total answer target: p50 <= 1.5 s and p95 <= 3.5 s.
 - Newly ingested text memories must be searchable immediately after a
   successful ingestion job.
-- Graph construction must complete within 60 seconds in the paper-scale worst
-  case.
 
 All latency reports MUST state whether model network time, queue time, and
 answer generation are included.
@@ -733,7 +628,7 @@ when actual tenant and traffic forecasts are available.
 - Retries must use exponential backoff, jitter, provider-aware retryability,
   and idempotent activities.
 - Poison jobs must enter a dead-letter workflow with redacted diagnostics.
-- PostgreSQL point-in-time recovery and Neo4j backup/restore must be tested.
+- PostgreSQL point-in-time recovery and restore must be tested.
 - Recovery point objective: <= 5 minutes. Recovery time objective: <= 60
   minutes.
 
@@ -756,17 +651,16 @@ when actual tenant and traffic forecasts are available.
 
 Every request and workflow must propagate a trace/request ID. Required metrics:
 
-- ingestion, extraction, resolution, graph, and search latency histograms;
+- ingestion, extraction, resolution, and search latency histograms;
 - operations by `ADD/UPDATE/DELETE/NOOP`;
 - extraction facts per message pair;
 - vector scores and empty-result rate;
-- graph nodes/edges created, reused, and invalidated;
 - LLM requests, retries, schema failures, tokens, and estimated cost;
 - queue depth/age and dead-letter count;
 - memory and embedding counts by state/version;
 - benchmark quality by category and commit.
 
-Alerts must cover high error rate, queue age, cross-store inconsistency, index
+Alerts must cover high error rate, queue age, outbox dispatch failures, index
 unavailability, latency SLO burn, provider throttling, and unexpected token-cost
 growth.
 
@@ -790,7 +684,6 @@ ground-truth answers.
 - retrieval recall@k using LOCOMO evidence dialog IDs where available;
 - extraction precision/recall on a manually labeled development set;
 - contradiction resolution accuracy;
-- graph entity-link and edge-validity accuracy.
 
 For paper comparability, LLM-as-a-Judge runs must be repeated 10 times for each
 method and reported as mean plus/minus one standard deviation. Judge prompt,
@@ -813,7 +706,6 @@ These are reproduction references, not universal SLOs:
 | Method | Overall judge | Retrieved context tokens | Search p50/p95 | Total p50/p95 |
 |---|---:|---:|---:|---:|
 | Mem0 | 66.88% | 1,764 | 0.148/0.200 s | 0.708/1.440 s |
-| Mem0g | 68.44% | 3,616 | 0.476/0.657 s | 1.091/2.590 s |
 | Full context | 72.90% | 26,031 | n/a | 9.870/17.117 s |
 
 Category-level judge references:
@@ -821,24 +713,19 @@ Category-level judge references:
 | Method | Single-hop | Multi-hop | Open-domain | Temporal |
 |---|---:|---:|---:|---:|
 | Mem0 | 67.13 | 51.15 | 72.93 | 55.51 |
-| Mem0g | 65.71 | 47.19 | 75.71 | 58.13 |
 
-The paper reports average stored-memory sizes of about 7,000 tokens for Mem0 and
-14,000 for Mem0g.
+The paper reports an average stored-memory size of about 7,000 tokens for Mem0.
 
 ### 16.5 Release gates
 
 Research fidelity is accepted when:
 
-- overall judge score is within 3 percentage points of the paper reference for
-  each architecture under a documented comparable model profile;
+- overall judge score is within 3 percentage points of the Mem0 paper reference
+  under a documented comparable model profile;
 - category scores are within 5 points, or the variance is explained by a
   controlled ablation;
-- Mem0g exceeds Mem0 on temporal questions and demonstrates the expected
-  overall/temporal trade-off;
-- average retrieved context remains <= 2,000 tokens for Mem0 and <= 4,000 for
-  Mem0g;
-- both systems reduce p95 total latency by at least 80% versus the full-context
+- average retrieved context remains <= 2,000 tokens for Mem0;
+- Mem0 reduces p95 total latency by at least 80% versus the full-context
   baseline on the same hardware/provider;
 - all multi-tenant isolation, idempotency, deletion, and provenance tests pass;
 - zero critical/high security findings remain open.
@@ -855,14 +742,12 @@ reporting, not silent threshold tuning on the test set.
 - temporal normalization and ordering;
 - token budgeting and deduplication;
 - schema validation and retry classification;
-- scope filters and authorization;
-- rank fusion and graph traversal bounds.
+- scope filters and authorization.
 
 ### Integration tests
 
 - PostgreSQL/pgvector exact and HNSW search with scope filters;
 - transactional memory event plus outbox write;
-- Neo4j node reuse, edge invalidation, and temporal queries;
 - workflow retries and idempotent replay;
 - provider adapter contract tests with recorded non-secret fixtures;
 - erasure across all stores and caches.
@@ -872,7 +757,7 @@ reporting, not silent threshold tuning on the test set.
 - golden extraction examples;
 - duplicate, augmentation, contradiction, and irrelevant/no-op examples;
 - relative dates, corrections, negation, ambiguity, and out-of-order events;
-- entity aliases, homonyms, and cross-speaker relationships;
+- cross-speaker facts and relationships expressed as text memories;
 - prompt-injection content treated as data;
 - regression thresholds per prompt/model version.
 
@@ -904,7 +789,6 @@ reporting, not silent threshold tuning on the test set.
 |   |-- providers/
 |   |-- repositories/
 |   |-- workflows/
-|   |-- graph/
 |   |-- retrieval/
 |   `-- telemetry/
 |-- migrations/
@@ -924,8 +808,8 @@ reporting, not silent threshold tuning on the test set.
 `-- pyproject.toml
 ```
 
-Domain code must depend on interfaces, not FastAPI, OpenAI, PostgreSQL, or
-Neo4j concrete clients.
+Domain code must depend on interfaces, not FastAPI, OpenAI, or PostgreSQL
+concrete clients.
 
 ## 19. Proposed implementation sequence
 
@@ -937,12 +821,10 @@ Neo4j concrete clients.
 | 4. Reconciliation | 1-2 weeks | Four-way resolver, versioning, audit, concurrency/idempotency |
 | 5. Retrieval/API | 1 week | Search, context bundle, optional answer API, SDK contract |
 | 6. Mem0 evaluation | 1 week | Ablations, benchmark report, latency/token profiling |
-| 7. Graph memory | 2 weeks | Entity/relation pipeline, Neo4j schema, conflict resolution |
-| 8. Graph retrieval/evaluation | 1-2 weeks | Dual retrieval, fusion, Mem0g benchmark |
-| 9. Hardening | 1-2 weeks | Security, erasure, load/failure tests, runbooks |
+| 7. Hardening | 1-2 weeks | Security, erasure, load/failure tests, runbooks |
 
-Total initial estimate: 10-14 engineer-weeks for one experienced engineer, or
-6-9 calendar weeks for a small backend/ML team. This estimate should be
+Total initial estimate: 7-10 engineer-weeks for one experienced engineer, or
+5-7 calendar weeks for a small backend/ML team. This estimate should be
 revised after a one-week technical spike.
 
 ## 20. Risks and mitigations
@@ -950,14 +832,11 @@ revised after a one-week technical spike.
 | Risk | Impact | Mitigation |
 |---|---|---|
 | Missing extraction/update prompts in paper | Reproduction scores may drift | Version prompts, create labeled dev set, publish ablations |
-| Unspecified graph thresholds/fusion | Over-merging entities or poor recall | Calibrate only on train/dev data; type-specific thresholds |
 | LLM nondeterminism/model drift | Flaky behavior and benchmark changes | Pin snapshots, temperature 0, schema validation, recurring evals |
 | Filtered ANN misses scoped results | Incorrect/empty retrieval | Exact-search fallback, iterative scans, recall monitoring |
 | Concurrent contradictory updates | Lost or inconsistent memory | Optimistic locks and resolver retry |
 | Prompt injection stored as memory | Persistent compromise | Treat messages as data, extraction policy, validation and red-team tests |
 | Sensitive data retention | Compliance/security exposure | Classification, consent/retention policy, encryption, erasure workflow |
-| Graph explosion | Cost and latency growth | Canonicalization, confidence thresholds, hop/node/token budgets |
-| Cross-store inconsistency | Text and graph disagree | Transactional outbox, idempotent graph projection, reconciliation job |
 | Evaluation leakage | Inflated results | Freeze test set, tune on held-out development split |
 | Provider latency/cost | SLO and budget failures | Rate limits, caching where safe, fallback providers, cost alerts |
 
@@ -968,10 +847,6 @@ revised after a one-week technical spike.
 | Extraction and operation prompts | Author original, schema-driven prompts; version and benchmark them |
 | Summary refresh frequency | Session boundary or every 20 messages |
 | Query-time number of text memories | Top 10 followed by token-budget trimming |
-| Entity similarity threshold `t` | Start at cosine 0.78; calibrate by entity type |
-| Triplet relevance threshold | Start at cosine 0.70; calibrate on development set |
-| Text/entity/triplet fusion | Reciprocal-rank fusion with configurable weights |
-| Graph traversal depth | One hop by default, maximum two online |
 | Exact vector database for Mem0 | PostgreSQL + pgvector |
 | Judge model | Pinned, capable model selected before baseline; report explicitly |
 | Deletion semantics in text memory | Soft delete plus eventual purge for auditability |
@@ -985,21 +860,19 @@ The team must confirm:
 
 1. Is the primary deliverable a research reproduction, a reusable self-hosted
    service, or both? This PRD assumes both, in that order.
-2. Is Mem0g required for the first customer-facing release, or can text memory
-   ship first?
-3. Which model providers and data-residency regions are permitted?
-4. What are the real first-year subject, memory, ingestion, and search volumes?
-5. What memory categories require consent, encryption, shortened retention, or
+2. Which model providers and data-residency regions are permitted?
+3. What are the real first-year subject, memory, ingestion, and search volumes?
+4. What memory categories require consent, encryption, shortened retention, or
    prohibition?
-6. Is answer generation part of this service or owned by the calling agent?
-7. Which deployment target and managed databases are approved?
-8. What latency and quality regression budgets block releases?
+5. Is answer generation part of this service or owned by the calling agent?
+6. Which deployment target and managed databases are approved?
+7. What latency and quality regression budgets block releases?
 
 ## 23. Definition of done
 
 The implementation is complete when:
 
-- all Phase 0-2 functional requirements are implemented and documented;
+- all active Phase 0-2 functional requirements are implemented and documented;
 - OpenAPI and SDK examples cover ingestion, search, context, correction, and
   erasure;
 - database migrations and local Docker Compose setup are reproducible;
@@ -1023,7 +896,6 @@ The implementation is complete when:
   [API compatibility guidance](https://platform.openai.com/docs/api-reference/backward-compatibility).
 - [pgvector](https://github.com/pgvector/pgvector) indexing and filtering
   documentation.
-- Neo4j [vector index documentation](https://neo4j.com/docs/cypher-manual/current/indexes/semantic-indexes/vector-indexes/).
 - [FastAPI](https://fastapi.tiangolo.com/tutorial/bigger-applications/),
   [Pydantic](https://docs.pydantic.dev/latest/concepts/models/),
   [SQLAlchemy async](https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html),
