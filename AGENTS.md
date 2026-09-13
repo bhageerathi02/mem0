@@ -11,3 +11,14 @@ Before making implementation changes:
 
 If the PRD and architecture document conflict, stop and resolve the documentation
 before implementing the conflicting behavior.
+
+## Code Review Rules
+
+- Flag implementation that conflicts with `docs/PRD.md` or
+  `docs/ARCHITECTURE.md`, including graph-memory functionality while it remains
+  deferred.
+- Flag any new service, datastore, framework, or cross-module dependency that is
+  introduced without updating `docs/ARCHITECTURE.md` and recording the reason.
+- Flag implementation changes that lack tests or evaluation checks appropriate
+  to the affected module, or that mix the research profile with production-only
+  enhancements.
