@@ -1,0 +1,38 @@
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"
+
+[project]
+name = "mem0-text-memory"
+version = "0.1.0"
+description = "A paper-faithful Mem0 text-memory service reimplementation."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv.build-backend]
+module-name = "memory_service"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.16.0",
+    "pytest>=8.4.0",
+    "ruff>=0.12.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "RUF", "SIM", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+pretty = true
+warn_unreachable = true
+
+[tool.pytest.ini_options]
+addopts = ["-ra", "--strict-config", "--strict-markers"]
+testpaths = ["tests"]
